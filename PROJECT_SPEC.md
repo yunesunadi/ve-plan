@@ -29,7 +29,14 @@ afterwards. The role determines which dashboard the user lands in and which API 
 Role enforcement is server-side: the API rejects a wrong-role request with `403` and the message
 `Unauthorized access.`, and the SPA reacts by sending the user back to their own dashboard home.
 Requests without a valid bearer token get `401 Unauthenticated access.` and the SPA redirects to
-`/login`.
+`/login`. The SPA also enforces this before a route loads: the dashboard guard blocks matching an
+`organizer/dashboard/**` or `attendee/dashboard/**` path against a JWT of the other role, redirecting
+to the signed-in user's own dashboard home instead; a signed-in user with no role yet is sent to
+`/role`, and a signed-out user to `/login`.
+
+Beyond role, editing or deleting a specific event is further restricted to the organizer who owns
+it: the API checks the event's `user` field against the caller and rejects any other organizer with
+`403 You are not the organizer of this event.`
 
 ## 2. Accounts and authentication
 
@@ -297,6 +304,9 @@ under the API's `/static/covers` and `/static/profiles` paths.
 ## 11. API surface
 
 All endpoints are mounted under `/api/v1`. "Any" means any authenticated user regardless of role.
+"Organizer (owner)" means the request is additionally checked against the event's owning organizer,
+rejecting any other organizer with `403`. Unhandled request errors fall through to a catch-all
+handler that responds `500 Something went wrong.` instead of leaking the underlying error.
 
 ### Auth (`/auth`)
 
@@ -330,8 +340,8 @@ All endpoints are mounted under `/api/v1`. "Any" means any authenticated user re
 | `GET /events/events_by_query` | Any | Public events with search/time/category/date filters and paging |
 | `GET /events/own` | Organizer | The organizer's own events, filtered by type, paged |
 | `GET /events/:id` | Any | One event |
-| `PUT /events/:id` | Organizer | Update an event |
-| `DELETE /events/:id` | Organizer | Delete an event and everything attached to it |
+| `PUT /events/:id` | Organizer (owner) | Update an event |
+| `DELETE /events/:id` | Organizer (owner) | Delete an event and everything attached to it |
 | `POST /sessions` | Organizer | Add a session to an event |
 | `GET /sessions` | Any | Sessions for the event given in the `event-id` request header |
 | `GET /sessions/:id` | Any | One session |
@@ -379,7 +389,7 @@ All endpoints are mounted under `/api/v1`. "Any" means any authenticated user re
 | `GET /meetings/:id/attendee` | Attendee | The room to join for the event |
 | `GET /meetings/:id/is_expired` | Any | Whether the meeting token has expired |
 | `POST /participants` | Attendee | Record joining the meeting |
-| `PUT /participants/:id` | Any | Record leaving and compute stay time |
+| `PUT /participants/:id` | Attendee | Record leaving and compute stay time |
 | `PUT /participants/:id/no_end_time` | Organizer | Close out participants still marked present |
 | `GET /participants/:id` | Organizer | Participants for an event |
 | `GET /participants/:id/stay_times` | Organizer | Stay-time distribution for the charts |
