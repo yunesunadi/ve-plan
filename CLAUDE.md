@@ -26,10 +26,10 @@ There is no test suite or lint script configured for the backend. There is no de
 ### Frontend (`frontend/`)
 
 ```bash
-ng serve                              # dev server, default (development) config
-npm run start:dev                     # explicit development configuration
+ng serve                              # dev server, default (development) config, uses environment.ts (localhost)
+npm run start:staging                 # serve against the staging backend (environment.staging.ts)
 npm run start:prod                    # serve with production configuration
-npm run build:dev / npm run build:prod  # production builds (rm -rf dist first)
+npm run build:staging / npm run build:prod  # builds (rm -rf dist first)
 ng test                               # Karma/Jasmine unit tests, all specs
 ng test --include='**/auth.service.spec.ts'   # run a single spec file
 ```
