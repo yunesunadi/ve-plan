@@ -94,8 +94,9 @@ password of at least 6 characters and clears the reset token.
 
 The settings page (available to both roles) allows:
 
-- Editing name, email and profile photo. Changing to an email already used by another account is
-  rejected with `409`.
+- Editing name and profile photo. Email is shown read-only and cannot be changed — it is the login
+  identifier and account-recovery channel, and for social accounts it mirrors the OAuth provider. The
+  `PUT /user` endpoint ignores any `email` field in the body.
 - Changing the password, which requires the current password to be supplied and correct.
 
 ## 3. Events
@@ -327,7 +328,7 @@ handler that responds `500 Something went wrong.` instead of leaking the underly
 | --- | --- | --- |
 | `GET /has_role` | Any | Whether a role is set, and which |
 | `GET /` | Any | The signed-in user's profile |
-| `PUT /` | Any | Update name, email, profile photo |
+| `PUT /` | Any | Update name and profile photo (email is read-only) |
 | `PUT /password` | Any | Change password with current-password check |
 | `GET /attendees?search=` | Organizer | Search attendee accounts by name or email |
 
