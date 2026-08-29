@@ -4,10 +4,13 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project overview
 
-VE-Plan is a virtual event planning platform with two independent apps that are not in the same npm/git workspace — each has its own `package.json`, `node_modules`, and lifecycle:
+VE-Plan is a virtual event planning platform with independent apps that are not in the same npm/git workspace — each is its own git repository with its own `package.json`/`pubspec.yaml`, dependencies, and lifecycle:
 
 - `backend/` — Node.js + Express + TypeScript + Mongoose (MongoDB) REST API with Socket.IO for real-time notifications.
 - `frontend/` — Angular 22 SPA (standalone components, zoneless change detection) with Angular Material, Bootstrap 5, and FullCalendar.
+- `mobile/` — Flutter app, **Android only** (iOS is planned but not yet set up — there is no `ios/` platform folder), Riverpod + `jitsi_meet_flutter_sdk`, that consumes the same backend API and mirrors the frontend's feature set. This file and `PROJECT_SPEC.md` focus on `backend/` and `frontend/`; the `mobile-elegance` agent covers the Flutter app.
+
+`backend/`, `frontend/`, and `mobile/` are git-ignored by the outer repo, which tracks only `CLAUDE.md`, `PROJECT_SPEC.md`, and `.claude/`.
 
 Two user roles drive almost all functionality: **organizer** (creates events/sessions, manages registrations, invites attendees, hosts meetings) and **attendee** (discovers/registers for events, accepts invitations, joins meetings). Meetings use 8x8.vc (Jitsi-based) video integration.
 
@@ -19,6 +22,7 @@ Two user roles drive almost all functionality: **organizer** (creates events/ses
 npm run dev     # tsc --watch + nodemon dist/index.js, concurrently (typical dev loop)
 npm start       # one-shot tsc build then nodemon dist/index.js
 npm run build   # tsc build + copy email templates into dist/
+npm run pm2:start / pm2:restart / pm2:stop / pm2:logs   # production process management via ecosystem.config.js
 ```
 
 There is no test suite or lint script configured for the backend. There is no dedicated `dev` env — running requires `backend/.env` populated (see Environment below).
@@ -47,9 +51,9 @@ Each domain (Event, Session, User, EventRegister, EventInvite, Meeting, Particip
 - **Services** contain the actual Mongoose queries/business logic and are imported as `import * as XService from "../services/XService"`.
 - **Models** (`models/*.ts`) are exported via `module.exports = mongoose.model(...)` (CommonJS-style, not `export default`), even though the rest of the codebase uses ES `import`/`export`. Cascading deletes are implemented with Mongoose `pre` hooks (e.g. deleting an `Event` cascades to its Sessions, EventRegisters, EventInvites, Meetings, and Participants — see `models/Event.ts`).
 
-Auth: `passport-jwt` validates the bearer token and attaches the decoded JWT payload as `req.user` (no DB lookup on each request — the JWT itself carries the user doc's fields). `middlewares/jwtAuth.ts` is an array `[passport.authenticate(...), checkUser]` used as a single middleware. `organizerAuth`/`attendeeAuth` check `req.user.role`; `eventOwnerAuth` additionally loads the event by `req.params.id` and rejects (`403`) any organizer who isn't the event's owner — used on `PUT`/`DELETE /events/:id`, after `organizerAuth` in the chain, and attaches the loaded event as `req.event`. Google/Facebook OAuth (`passport-google-oauth20`, `passport-facebook`) issue the same kind of JWT on successful callback.
+Auth: `passport-jwt` validates the bearer token and attaches the decoded JWT payload as `req.user` (no DB lookup on each request — the JWT itself carries the user doc's fields). `middlewares/jwtAuth.ts` is an array `[passport.authenticate(...), checkUser]` used as a single middleware. `organizerAuth`/`attendeeAuth` check `req.user.role`; `eventOwnerAuth` additionally loads the event by `req.params.id` (`404` if it no longer exists) and rejects (`403`) any organizer who isn't the event's owner — used on `PUT`/`DELETE /events/:id`, after `organizerAuth` in the chain, and attaches the loaded event as `req.event`. Google/Facebook OAuth (`passport-google-oauth20`, `passport-facebook`) issue the same kind of JWT on successful callback; a `client=mobile` query flag is threaded through the OAuth `state` so the callback redirects to the `veplanauth://oauth?token=` deep link instead of `<frontend>/social_login_redirect`. `POST /auth/facebook/token` is a redirect-free path for native mobile: `services/FacebookService.ts` verifies a Facebook access token against the Graph API and `UserService.upsertFacebookUser` links or creates the account.
 
-Runs on Express 5 (built-in `express.json()`/`express.urlencoded()`, no `body-parser`) and Multer 2. A catch-all error-handling middleware (registered after the 404 handler in `index.ts`) turns any thrown/rejected error into `500 { status: "error", message: "Something went wrong." }` instead of leaking it.
+Runs on Express 5 (built-in `express.json()`/`express.urlencoded()`, no `body-parser`) and Multer 2, with `morgan("dev")` request logging. A catch-all error-handling middleware (registered after the 404 handler in `index.ts`) turns any thrown/rejected error into `500 { status: "error", message: "Something went wrong." }` instead of leaking it.
 
 Real-time notifications: `libs/socket.ts` authenticates Socket.IO connections via JWT in the handshake, joins each user to a private room (`user_<id>`), and exposes `sendToUser(userId, event, data)` for services (e.g. `NotificationService`) to push events to a specific user.
 
@@ -68,12 +72,12 @@ Guards (`guards/`):
 - `hasRoleGuard` — used on the `/role` page; redirects already-role-assigned users straight to their dashboard.
 - `completeAuthGuard` — a `CanMatchFn` gating the lazy feature routes: redirects to `/login` if not signed in, to `/role` if the account has no role yet, and to the caller's own `<role>/dashboard/home` if the matched path's role (`organizer`/`attendee`) doesn't match the JWT's role — so a signed-in attendee can no longer reach `organizer/dashboard/**` by URL, and vice versa.
 
-Interceptors (`interceptors/`) are registered via `provideHttpClient(withInterceptors([...]))` in `app.module.ts`: `unauthenticatedInterceptor` (401 handling), `unauthorizedInterceptor` (403 handling), `notFoundInterceptor` (404 handling).
+Interceptors (`interceptors/`) are registered via `provideHttpClient(withXhr(), withInterceptors([...]))` in `app.config.ts` (there is no `app.module.ts`), in order: `notFoundInterceptor` (404 handling), `unauthenticatedInterceptor` (401 handling), `unauthorizedInterceptor` (403 handling).
 
-Feature-flagged config lives in `src/environments/environment*.ts` — `apiUrl`, `socketUrl`, static asset URLs (`profileUrl`/`coverUrl`), the 8x8.vc `appId`/`meeting_domain`, and OAuth redirect URLs. `environment.production.ts` is swapped in automatically by the `production` build configuration (see `angular.json` `fileReplacements`).
+Feature-flagged config lives in `src/environments/environment*.ts` — `apiUrl`, `socketUrl`/`socketPath`, static asset URLs (`profileUrl`/`coverUrl`), the 8x8.vc `appId`/`meeting_domain`, and the OAuth entry-point URLs (`google_oauth_url`/`facebook_oauth_url`). `environment.production.ts` is swapped in automatically by the `production` build configuration (see `angular.json` `fileReplacements`); `environment.staging.ts` by the `staging` configuration.
 
 Services under `services/` are thin HTTP wrappers (one per backend resource, mirroring the backend route names) that return typed `Observable`s using shared response types from `models/Utils.ts`. `caches/` holds services that memoize cross-cutting state used by guards (e.g. `DashboardCacheService.has_role`).
 
 ### Environment configuration
 
-Backend expects a `.env` in `backend/` with (non-exhaustive): `DB_URL`, `JWT_SECRET`, `FRONTEND_URL`, `CORS_ORIGIN`, `PORT`, Google/Facebook OAuth credentials (`GOOGLE_CLIENT_ID`/`SECRET`/`CALLBACK_URL`, `FACEBOOK_APP_ID`/`SECRET`/`CALLBACK_URL`), SMTP/SendGrid email credentials (`SENDER`, `SMTP_SERVICE`, `SMTP_USER`, `SENDGRID_API_KEY`, `OAUTH_*`), 8x8.vc Jitsi credentials (`JITSI_APP_ID`, `JITSI_API_KEY`), and per-template HTML file paths (`*_TEMPLATE` vars pointing into `src/email_templates/`).
+Backend expects a `.env` in `backend/` with (non-exhaustive): `DB_URL`, `JWT_SECRET`, `FRONTEND_URL`, `CORS_ORIGIN`, `PORT`, Google/Facebook OAuth credentials (`GOOGLE_CLIENT_ID`/`SECRET`/`CALLBACK_URL`, `FACEBOOK_APP_ID`/`SECRET`/`CALLBACK_URL`, optional `FACEBOOK_GRAPH_VERSION`), Gmail SMTP OAuth2 email credentials (`SENDER`, `SMTP_USER`, `OAUTH_CLIENT_ID`, `OAUTH_CLIENT_SECRET`, `OAUTH_REFRESH_TOKEN`, `OAUTH_ACCESS_TOKEN`), and 8x8.vc Jitsi credentials (`JITSI_APP_ID`, `JITSI_API_KEY`, `PRIVATE_KEY_PATH` — path to the RS256 private-key `.pem`). `EmailService` resolves templates by action name from `src/email_templates/<action>.html` and talks to `smtp.gmail.com` directly; the `SENDGRID_API_KEY`, `RESEND_API_KEY`, `SMTP_SERVICE`, and `*_TEMPLATE` keys still in older `.env` files are not read by the current code.

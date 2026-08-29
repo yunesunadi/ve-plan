@@ -96,7 +96,7 @@ Build to the standard of a shipped, commercial consumer app — simple and intui
 
 - Material 3 theming with a deliberate `ColorScheme`, a real typographic scale, and a consistent spacing/radius system (e.g. an 8pt grid) applied everywhere instead of one-off paddings.
 - Strong visual hierarchy: primary actions unmistakably primary, secondary/destructive actions visually subordinate, generous whitespace over cramped density.
-- Native, platform-appropriate interaction patterns — pull-to-refresh on lists, swipe actions where they make sense, bottom sheets/dialogs used the way iOS/Android users expect, haptic feedback on meaningful confirmations, adaptive layout for tablets/large screens.
+- Native, platform-appropriate interaction patterns — pull-to-refresh on lists, swipe actions where they make sense, bottom sheets/dialogs used the way Android users expect, haptic feedback on meaningful confirmations, adaptive layout for tablets/large screens.
 - Support both light and dark mode from the same theme definition.
 - Navigation should read as a small number of clear destinations per role (mirroring the sidebar in PROJECT_SPEC.md §10.1 — Calendar/Home and Events for everyone, My Events for organizers, Invitations and Joined Events for attendees, plus Notifications and Settings), not a deep or ambiguous hierarchy.
 - Accessibility is not optional: adequate contrast, tap targets, `Semantics` labels on icon-only controls, and support for system text scaling.

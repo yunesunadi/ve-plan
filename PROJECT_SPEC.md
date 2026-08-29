@@ -7,6 +7,11 @@ invitations, and join those meetings. Video is provided by 8x8.vc (Jitsi as a Se
 This document describes what the product does today. It is a behavior spec, not a development
 guide — see `CLAUDE.md` for build commands and code-level conventions.
 
+The product has two clients on one REST API: a web SPA (Angular) and a native mobile app
+(Flutter). The mobile app is **Android only** for now — iOS is planned but not yet set up. This
+spec focuses on API and web behavior; where it refers to a "mobile client" or "native mobile app",
+that means the Android app.
+
 ## 1. Roles and permissions
 
 Every account has exactly one role, chosen once after the account is created and never changed
@@ -35,8 +40,9 @@ to the signed-in user's own dashboard home instead; a signed-in user with no rol
 `/role`, and a signed-out user to `/login`.
 
 Beyond role, editing or deleting a specific event is further restricted to the organizer who owns
-it: the API checks the event's `user` field against the caller and rejects any other organizer with
-`403 You are not the organizer of this event.`
+it: the API loads the event by id (returning `404 There is no event with this ID.` if it is gone),
+checks the event's `user` field against the caller, and rejects any other organizer with `403 You are
+not the organizer of this event.`
 
 ## 2. Accounts and authentication
 
@@ -71,9 +77,14 @@ Both providers are offered on the login screen and follow the same shape:
 - If an account already exists with the same email address, the provider ID is linked to it.
 - Otherwise a new account is created, already marked verified, with the provider's photo URL stored
   as the profile picture.
-- The callback redirects to `<frontend>/social_login_redirect?token=…`; the SPA stores the token and
-  goes to role selection, which immediately forwards users who already have a role to their
-  dashboard.
+- The OAuth entry point carries a `client=mobile` query flag through the provider `state`. On the
+  callback, web clients are redirected to `<frontend>/social_login_redirect?token=…` and mobile
+  clients to the `veplanauth://oauth?token=…` deep link. The SPA stores the token and goes to role
+  selection, which immediately forwards users who already have a role to their dashboard.
+- Native mobile apps can also skip the browser redirect entirely: `POST /auth/facebook/token` takes a
+  Facebook access token, verifies it against the Graph API (`debug_token` + `/me`), upserts the
+  matching account, and returns the same 14-day JWT. A Facebook account with no email address is
+  rejected with `400`.
 
 Profile pictures coming from a provider are absolute URLs and are rendered as-is; uploaded pictures
 are served from the API's static photo directory. Users with no picture get a placeholder image.
@@ -90,14 +101,21 @@ Requesting a reset for an unknown email returns `404`. Otherwise a reset link
 (`<frontend>/reset_password?token=…`) is emailed and is valid for one hour. Resetting requires a
 password of at least 6 characters and clears the reset token.
 
+An account that was created through Google or Facebook and has never set a password cannot use this
+flow — both the request and the reset step reject it with `400 This account uses social login and
+has no password.`
+
 ### 2.7 Profile settings
 
 The settings page (available to both roles) allows:
 
 - Editing name and profile photo. Email is shown read-only and cannot be changed — it is the login
   identifier and account-recovery channel, and for social accounts it mirrors the OAuth provider. The
-  `PUT /user` endpoint ignores any `email` field in the body.
-- Changing the password, which requires the current password to be supplied and correct.
+  `PUT /user` endpoint accepts only `name` and the photo.
+- Changing the password, which requires the current password to be supplied and correct. `GET /user`
+  returns a `hasPassword` flag; the settings page hides the Change Password section for social-login
+  accounts that have no password of their own, and `PUT /user/password` independently rejects them
+  with `400 This account uses social login and has no password.`
 
 ## 3. Events
 
@@ -157,7 +175,9 @@ events they own. Any signed-in user can read an event's sessions; the detail pag
 1. On a public event, an attendee clicks **Register**. This creates a registration in the pending
    state. The button then reads "Registered" and clicking it again unregisters, after a
    confirmation prompt.
-2. Register and unregister are disabled once the event's date and end time have passed.
+2. Register and unregister are disabled in the UI once the event's date and end time have passed, and
+   the API independently rejects a late registration with `400 This event has already ended and can no
+   longer be registered for.`
 3. The organizer opens **Registered Users** for the event: a searchable, paginated table (10 per
    page) of registrants with their approval status. Already-approved rows have no checkbox, and the
    Send Approval action is disabled once the event has ended.
@@ -173,9 +193,10 @@ events they own. Any signed-in user can read an event's sessions; the detail pag
 
 1. The organizer opens **Invite Users** for an event and types a keyword; the search returns
    attendee-role users matching the keyword by name or email (debounced, 500 ms).
-2. The organizer selects users and confirms. If any selected user has already been invited to that
-   event, the whole request is rejected with `409` and a message naming those users — no invitations
-   or emails are sent.
+2. The organizer selects users and confirms. Inviting to an event that has already ended is rejected
+   with `400 This event has already ended and can no longer be invited to.` If any selected user has
+   already been invited to that event, the whole request is rejected with `409` and a message naming
+   those users — no invitations or emails are sent.
 3. Otherwise each invitee receives an "Event Invitation" email and an in-app notification, and an
    invitation record is created in the pending state.
 4. The organizer can review **Invited Users** and **Accepted Users** for the event in dialogs.
@@ -204,6 +225,13 @@ the register button — invitation and registration are alternative paths into t
   meeting shows "Can't join this meeting since meeting token is expired." and closes the dialog.
 - Both Start and Join are disabled once the event's date and end time have passed.
 
+Once a meeting exists, the meeting page also offers **End Meeting**. Ending it, after a confirmation
+prompt, flags the meeting as ended (recording `ended_at`) and sends every attendee who was notified
+that the meeting started a "Meeting Ended" email and in-app notification. While a meeting is ended the
+page shows "This meeting has ended. Attendees can no longer join until it is re-opened." and replaces
+the button with **Reopen**; reopening clears the ended flag and re-sends the "Meeting Started" email
+and notification to the same attendees.
+
 ### 7.2 Notifying attendees
 
 From the meeting page, **View Attendees** lists the event's approved registrants and accepted
@@ -214,8 +242,9 @@ Already-notified rows have no checkbox, and the send action is disabled once the
 ### 7.3 Joining (attendee)
 
 - The **Join Meeting** button appears on the attendee's event page only when a meeting exists for the
-  event *and* the attendee has been notified as described above. It is disabled after the event has
-  ended.
+  event, the attendee has been notified as described above, and the meeting has not been ended by the
+  organizer. It is disabled after the event has ended. If the attendee is already in the join dialog
+  when the meeting ends, it reports "This meeting has ended."
 - The attendee joins the organizer's room with a freshly minted non-moderator token, so the organizer
   remains the only moderator.
 - Joining creates the attendee's participant record with a start time; leaving records the end time
@@ -247,6 +276,7 @@ delivered to their own sessions. The socket connects when a dashboard is opened.
 | Registration approved | The approved attendees | Registration Approved |
 | Invitation sent | The invited attendees | Invitation |
 | Meeting started notice sent | The selected attendees | Meeting Started |
+| Meeting ended (or reopened) | The attendees already notified for that meeting | Meeting Ended / Meeting Started |
 
 Private events do not generate created/updated notifications.
 
@@ -256,8 +286,10 @@ mark as read or delete them. Acting with nothing selected shows a prompt to sele
 
 ## 9. Transactional email
 
-Emails are rendered from HTML templates with `{{name}}`, `{{event_title}}` and `{{link}}`
-placeholders and sent over SMTP with OAuth2 credentials. The five templates in use are:
+Emails are rendered from HTML templates named after the action (`src/email_templates/<action>.html`),
+with `{{name}}`, `{{event_title}}` and `{{link}}` placeholders substituted in. They are sent over
+Gmail SMTP with OAuth2 credentials, retrying up to three times on transient connection errors. The
+six templates in use are:
 
 | Action | Subject | Sent when |
 | --- | --- | --- |
@@ -265,7 +297,8 @@ placeholders and sent over SMTP with OAuth2 credentials. The five templates in u
 | `reset_password` | Password Reset | A password reset is requested |
 | `register_approved` | Registration Approved | An organizer approves registrants |
 | `invitation_sent` | Event Invitation | An organizer invites attendees |
-| `meeting_started` | Meeting Started | An organizer notifies attendees a meeting began |
+| `meeting_started` | Meeting Started | An organizer notifies attendees a meeting began, or reopens an ended meeting |
+| `meeting_ended` | Meeting Ended | An organizer ends a meeting |
 
 ## 10. Application structure and access control
 
@@ -319,15 +352,16 @@ handler that responds `500 Something went wrong.` instead of leaking the underly
 | `POST /role` | Any | Set the role once and return a refreshed JWT |
 | `POST /forgot_password` | Public | Email a password reset link |
 | `POST /reset_password?token=` | Public | Set a new password |
-| `GET /google`, `GET /google/callback` | Public | Google OAuth sign-in |
-| `GET /facebook`, `GET /facebook/callback` | Public | Facebook OAuth sign-in |
+| `GET /google`, `GET /google/callback` | Public | Google OAuth sign-in (web or mobile via `client=mobile`) |
+| `GET /facebook`, `GET /facebook/callback` | Public | Facebook OAuth sign-in (web or mobile via `client=mobile`) |
+| `POST /facebook/token` | Public | Exchange a Facebook access token for a JWT (native mobile) |
 
 ### Users (`/user`)
 
 | Endpoint | Access | Purpose |
 | --- | --- | --- |
 | `GET /has_role` | Any | Whether a role is set, and which |
-| `GET /` | Any | The signed-in user's profile |
+| `GET /` | Any | The signed-in user's profile, plus a `hasPassword` flag |
 | `PUT /` | Any | Update name and profile photo (email is read-only) |
 | `PUT /password` | Any | Change password with current-password check |
 | `GET /attendees?search=` | Organizer | Search attendee accounts by name or email |
@@ -386,7 +420,9 @@ handler that responds `500 Something went wrong.` instead of leaking the underly
 | `GET /meetings/:id` | Organizer | The organizer's meeting record for the event |
 | `PUT /meetings/:id/start_time` | Organizer | Record when the meeting began |
 | `PUT /meetings/:id/end_time` | Organizer | Record the end and compute the duration |
-| `GET /meetings/:id/is_started` | Attendee | Whether a meeting exists and they were notified |
+| `PUT /meetings/:id/end` | Organizer | Mark the meeting ended and notify attendees |
+| `PUT /meetings/:id/reopen` | Organizer | Clear the ended flag and re-notify attendees |
+| `GET /meetings/:id/is_started` | Attendee | Whether a meeting exists, they were notified, and it is not ended |
 | `GET /meetings/:id/attendee` | Attendee | The room to join for the event |
 | `GET /meetings/:id/is_expired` | Any | Whether the meeting token has expired |
 | `POST /participants` | Attendee | Record joining the meeting |
@@ -414,23 +450,27 @@ handler that responds `500 Something went wrong.` instead of leaking the underly
 | Session | title, description, speaker_info, start_time, end_time, event |
 | EventRegister | event, user, register_approved, meeting_started |
 | EventInvite | event, user, invitation_sent, invitation_accepted, meeting_started |
-| Meeting | event, user (host), room_name, token, start_time, end_time, duration |
+| Meeting | event, user (host), room_name, token, start_time, end_time, duration, ended, ended_at |
 | Participant | event, user, room_name, start_time, end_time, duration |
-| Notification | recipient, sender (event), type, title, message, isRead, readAt |
+| Notification | recipient, sender (event), type (`first_time_register`, `event_created`, `event_updated`, `register_approved`, `event_invited`, `meeting_started`, `meeting_ended`), title, message, isRead, readAt |
 
 All documents carry creation and update timestamps. Deleting an event cascades to its sessions,
 registrations, invitations, meetings and participants.
 
 Responses follow one envelope: `{ status: "success" | "error", message, data? }`, with boolean
 checks (`has_registered`, `is_register_approved`, `is_created`, `is_started`, `is_expired`,
-`has_role`) returned as their own top-level flags.
+`has_role`) returned as their own top-level flags, and minted tokens returned as a top-level `token`.
 
 ## 13. Configuration and integrations
 
-- **MongoDB** stores all application data; **Socket.IO** carries live notifications.
+- **MongoDB** stores all application data; **Socket.IO** carries live notifications. Every HTTP
+  request is logged with `morgan`.
 - **8x8.vc** provides video. The app ID and meeting domain are configured per environment, and
-  meeting tokens are RS256-signed for the configured Jitsi app.
+  meeting tokens are RS256-signed with a private key file (`PRIVATE_KEY_PATH`) for the configured
+  Jitsi app and API key.
 - **Google and Facebook OAuth** credentials and callback URLs are environment-configured, as are the
-  SMTP/OAuth2 email credentials, sender address and template paths.
-- The SPA reads the API URL, socket URL, static photo URLs, 8x8.vc settings and OAuth entry-point
-  URLs from its environment file, which is swapped for the production variant at build time.
+  Gmail SMTP OAuth2 email credentials and sender address.
+- The SPA reads the API URL, socket URL and path, static photo URLs, 8x8.vc settings and OAuth
+  entry-point URLs from its environment file, which is swapped for the production variant at build
+  time.
+- The backend ships a `pm2` ecosystem config for production deployment.
