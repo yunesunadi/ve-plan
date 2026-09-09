@@ -7,10 +7,8 @@ invitations, and join those meetings. Video is provided by 8x8.vc (Jitsi as a Se
 This document describes what the product does today. It is a behavior spec, not a development
 guide — see `CLAUDE.md` for build commands and code-level conventions.
 
-The product has two clients on one REST API: a web SPA (Angular) and a native mobile app
-(Flutter). The mobile app is **Android only** for now — iOS is planned but not yet set up. This
-spec focuses on API and web behavior; where it refers to a "mobile client" or "native mobile app",
-that means the Android app.
+The product is one REST API (Node/Express) with a web SPA client (Angular). This spec describes
+the API and the web app's behavior.
 
 ## 1. Roles and permissions
 
@@ -102,18 +100,15 @@ Both providers are offered on the login screen and follow the same shape:
 - Otherwise a new account is created, already marked verified, with the provider's photo URL stored
   as the profile picture.
 - The OAuth entry point mints a random nonce, stores it in a short-lived (10-minute) signed
-  `HttpOnly` `SameSite=Lax` cookie, and carries it together with the `client` (`web`/`mobile`) hint
-  through the provider `state` as base64url-JSON. On the callback the API rejects the response with
-  `400 Invalid OAuth state.` unless the returned nonce matches the cookie (the standard OAuth CSRF
-  defence), then redirects — web clients to `<frontend>/social_login_redirect?token=…`, mobile
-  clients to the `veplanauth://oauth?token=…` deep link — with `Referrer-Policy: no-referrer` set so
-  the token is not leaked onward through the redirect. The SPA stores the token, strips it from the
-  URL, and goes to role selection, which immediately forwards users who already have a role to their
-  dashboard.
-- Native mobile apps can also skip the browser redirect entirely: `POST /auth/facebook/token` takes a
-  Facebook access token, verifies it against the Graph API (`debug_token` + `/me`), upserts the
-  matching account, and returns the same 7-day JWT. A Facebook account with no email address is
-  rejected with `400`.
+  `HttpOnly` `SameSite=Lax` cookie, and carries it through the provider `state` as base64url-JSON.
+  On the callback the API rejects the response with `400 Invalid OAuth state.` unless the returned
+  nonce matches the cookie (the standard OAuth CSRF defence), then redirects to
+  `<frontend>/social_login_redirect?token=…` with `Referrer-Policy: no-referrer` set so the token is
+  not leaked onward through the redirect. The SPA stores the token, strips it from the URL, and goes
+  to role selection, which immediately forwards users who already have a role to their dashboard.
+- `POST /auth/facebook/token` is a redirect-free alternative: it takes a Facebook access token,
+  verifies it against the Graph API (`debug_token` + `/me`), upserts the matching account, and
+  returns the same 7-day JWT. A Facebook account with no email address is rejected with `400`.
 
 Profile pictures coming from a provider are absolute URLs and are rendered as-is; uploaded pictures
 are served from the API's static photo directory. Users with no picture get a placeholder image.
@@ -488,15 +483,15 @@ are readable without seeing the canvas.
 
 Notifications are stored per recipient and also pushed live over a Socket.IO connection that is
 authenticated with the same JWT; each user is placed in a private room so notifications are only
-delivered to their own sessions. Each client opens a single connection for the whole signed-in
-session — owned by the app shell (web) and by a session listener (mobile), not by the notifications
-screen — and closes it on logout. The handshake re-runs on every connection (including reconnects):
+delivered to their own sessions. The SPA opens a single connection for the whole signed-in
+session — owned by the app shell, not by the notifications screen — and closes it on logout. The
+handshake re-runs on every connection (including reconnects):
 it re-loads the account and rejects the connection if the account is gone or the token's
 `tokenVersion` no longer matches, so a socket cannot outlive a logout, password change or account
 deletion; after a password change the client reconnects with the fresh token. Because a live emit
-to an offline socket is lost, the clients treat the stored notifications as the source of truth and
-the socket only as an accelerator: on every connect and reconnect they refetch the list and the
-unread count so nothing that arrived during a drop is missed, and merge live events by id so a
+to an offline socket is lost, the SPA treats the stored notifications as the source of truth and
+the socket only as an accelerator: on every connect and reconnect it refetches the list and the
+unread count so nothing that arrived during a drop is missed, and merges live events by id so a
 notification is never shown twice. The connection CORS origin is restricted to the configured
 origins (never `*`), a single account may hold at most five concurrent sockets (the oldest is
 dropped when a sixth connects), and every connect and disconnect is logged with the user and socket
@@ -517,7 +512,7 @@ id.
 An event edit only notifies when a field attendees care about — title, date, start or end time —
 actually changed; a description-only edit is silent. The public "event updated" broadcast is
 debounced to at most once per hour per event. Every event-related notification carries a reference
-to its event (`sender`), which the clients use to deep-link. The broadcast fan-out is done in
+to its event (`sender`), which the SPA uses to deep-link. The broadcast fan-out is done in
 batches over an id-only projection rather than loading every user document.
 
 Notifications are stored per recipient and also pushed live over a Socket.IO connection; the stored
@@ -529,7 +524,7 @@ copy is the source of truth and the socket is an accelerator.
 takes a capped array of ids and only touches rows that are still unread. Deleting takes the id array
 in the request body (a JSON string in the `notification_id_list` query param is still accepted for
 older clients). Notification history is bounded server-side: rows are removed 90 days after creation
-by a TTL index (both clients page the recent set newest-first and never read further back).
+by a TTL index (the SPA pages the recent set newest-first and never reads further back).
 
 The notifications screen groups rows by day (Today, Yesterday, then the date) and offers an
 All / Unread filter over the loaded list, with more pages fetched as the user scrolls. Unread rows
@@ -597,10 +592,9 @@ Both dashboards share a toolbar (notifications bell with an unread count, and a 
 Appearance and Logout) and the same four primary destinations for both roles: **Home, Events, My
 Events, Calendar** — Home being the role's dashboard, not the calendar. Settings, Terms and
 Conditions and Privacy Policy sit in a secondary group at the bottom of the navigation drawer. The
-shell is responsive across one codebase rather than a separate mobile layout: a bottom navigation
-bar below the tablet breakpoint, a collapsed icon-only rail at tablet width, and a fully labelled
-side drawer at desktop width and up; the drawer's expanded/collapsed preference persists across
-sessions on the widths where the user has a choice. Logging out asks for confirmation via the same
+shell is responsive: a bottom navigation bar below the tablet breakpoint, a collapsed icon-only
+rail at tablet width, and a fully labelled side drawer at desktop width and up; the drawer's
+expanded/collapsed preference persists across sessions on the widths where the user has a choice. Logging out asks for confirmation via the same
 themed confirmation dialog used elsewhere in the app (see 10.5), then clears the stored token and
 returns to login.
 
@@ -655,8 +649,8 @@ matched to the exact server log line.
 
 Cover images and profile photos are uploaded as multipart form data and served back as static files
 under the API's `/static/covers` and `/static/profiles` paths (with `X-Content-Type-Options:
-nosniff` and `Cross-Origin-Resource-Policy: cross-origin`, so the SPA and the mobile app can load
-them from another origin). An upload must be a JPEG, PNG, or WebP of at most 5 MB — the declared
+nosniff` and `Cross-Origin-Resource-Policy: cross-origin`, so the SPA can load them from another
+origin). An upload must be a JPEG, PNG, or WebP of at most 5 MB — the declared
 content type is checked against the file's magic bytes, and a mismatch is `415`, an oversize file
 `413` (returned as the normal JSON envelope by a dedicated upload-error middleware rather than
 bubbling to the generic `500`; a reverse proxy in front of the API must be configured to allow a
@@ -746,9 +740,9 @@ start if `DB_URL`, `JWT_SECRET`, `FRONTEND_URL`, `CORS_ORIGIN`, `PRIVATE_KEY_PAT
 | `POST /role` | Any | Set the role once and return a refreshed JWT |
 | `POST /forgot_password` | Public (rate-limited) | Email a password reset link; non-enumerating response |
 | `POST /reset_password?token=` | Public (rate-limited) | Set a new password (`410` on an expired link) |
-| `GET /google`, `GET /google/callback` | Public | Google OAuth sign-in (web or mobile via `client=mobile`) |
-| `GET /facebook`, `GET /facebook/callback` | Public | Facebook OAuth sign-in (web or mobile via `client=mobile`) |
-| `POST /facebook/token` | Public | Exchange a Facebook access token for a JWT (native mobile) |
+| `GET /google`, `GET /google/callback` | Public | Google OAuth sign-in |
+| `GET /facebook`, `GET /facebook/callback` | Public | Facebook OAuth sign-in |
+| `POST /facebook/token` | Public | Exchange a Facebook access token for a JWT (redirect-free) |
 
 ### Users (`/user`)
 
@@ -904,7 +898,7 @@ top-level `token` next to the `room_name` it is scoped to.
   request's id and the `500` response body includes it as `data.requestId` for support
   correlation. Level is `info` in production, `debug` otherwise; override with the optional
   `LOG_LEVEL` env. Unhandled server errors are tagged `event: "unhandled_error"` and logged with
-  their stack; reports from the web client arrive tagged `event: "client_error"`, so both classes
+  their stack; reports from the SPA arrive tagged `event: "client_error"`, so both classes
   can be filtered out of the request stream.
 - **Metrics** are exposed in Prometheus text format on the token-guarded `GET /api/v1/metrics`:
   standard process metrics (event-loop lag, heap, GC) plus request duration and request count
